@@ -1,0 +1,5 @@
+{
+  "name": "SilenceCut",
+  "description": "Instant client-side audio silence remover. Automatically detects and shortens silent parts of your audio files without server uploads.",
+  "requestFramePermissions": []
+}
