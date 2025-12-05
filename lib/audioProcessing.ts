@@ -23,6 +23,10 @@ export interface SilenceOptions {
   padding?: number;
 }
 
+export interface EnhanceOptions {
+  aggressiveGate?: boolean;
+}
+
 export interface AudioRegion {
   start: number; // sample index
   end: number;   // sample index
@@ -49,65 +53,134 @@ export const decodeAudio = async (file: File): Promise<AudioBuffer> => {
 };
 
 /**
+ * Estimates the noise floor of the audio buffer in dB.
+ * Scans the file to find the quietest consistent sections.
+ */
+const getNoiseFloor = (buffer: AudioBuffer): number => {
+  const data = buffer.getChannelData(0);
+  const sampleRate = buffer.sampleRate;
+  
+  // We check 50ms windows
+  const windowSize = Math.floor(sampleRate * 0.05); 
+  // Hop size: check every 1 second to be fast (scan across file)
+  const hopSize = sampleRate; 
+  
+  const rmsValues: number[] = [];
+  
+  for (let i = 0; i < data.length; i += hopSize) {
+    let sum = 0;
+    let count = 0;
+    // Calculate RMS of this window
+    for (let j = 0; j < windowSize && i + j < data.length; j++) {
+      const val = data[i + j];
+      sum += val * val;
+      count++;
+    }
+    
+    if (count > 0) {
+      const rms = Math.sqrt(sum / count);
+      if (rms > 0.000001) { // Ignore absolute digital silence
+        rmsValues.push(rms);
+      }
+    }
+  }
+  
+  if (rmsValues.length === 0) return -60; // Default fallback
+
+  // Sort to find quietest parts
+  rmsValues.sort((a, b) => a - b);
+  
+  // Take the 10th percentile (to avoid outliers/dropouts)
+  const p10Index = Math.floor(rmsValues.length * 0.1);
+  const noiseFloorRms = rmsValues[p10Index] || rmsValues[0];
+  
+  return 20 * Math.log10(noiseFloorRms);
+};
+
+/**
  * Applies a software noise gate to an AudioBuffer.
  * effectively attenuates breaths and background noise.
  */
-const applyNoiseGate = (buffer: AudioBuffer, thresholdDb: number = -45): AudioBuffer => {
+const applyNoiseGate = async (buffer: AudioBuffer, thresholdDb: number = -45, aggressive: boolean = false): Promise<AudioBuffer> => {
   const numChannels = buffer.numberOfChannels;
   const sampleRate = buffer.sampleRate;
   const length = buffer.length;
   
-  // Create a new buffer for the gated output
-  const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-  const newBuffer = audioContext.createBuffer(numChannels, length, sampleRate);
+  const offlineCtx = new OfflineAudioContext(numChannels, length, sampleRate);
+  const outputBuffer = offlineCtx.createBuffer(numChannels, length, sampleRate);
   
   const threshold = Math.pow(10, thresholdDb / 20);
-  const attackTime = 0.005; // 5ms attack
-  const releaseTime = 0.1; // 100ms release
   
-  // Coefficients for envelope follower
+  // Aggressive mode uses faster attack/release to chop noise between words
+  // V3 Update: Even faster release (0.05s) to cut tight background chatter
+  const attackTime = aggressive ? 0.001 : 0.01; 
+  const releaseTime = aggressive ? 0.05 : 0.2; 
+  
   const attackCoeff = Math.exp(-1 / (sampleRate * attackTime));
   const releaseCoeff = Math.exp(-1 / (sampleRate * releaseTime));
 
+  const chunkSize = 48000; 
+
   for (let c = 0; c < numChannels; c++) {
     const inputData = buffer.getChannelData(c);
-    const outputData = newBuffer.getChannelData(c);
+    const outputData = outputBuffer.getChannelData(c);
     let envelope = 0;
     
     for (let i = 0; i < length; i++) {
       const input = inputData[i];
       const absInput = Math.abs(input);
       
-      // Envelope follower
       if (absInput > envelope) {
         envelope = attackCoeff * envelope + (1 - attackCoeff) * absInput;
       } else {
         envelope = releaseCoeff * envelope + (1 - releaseCoeff) * absInput;
       }
       
-      // Gate Logic (Expander)
       let gain = 1.0;
       if (envelope < threshold) {
-        // Smoothly attenuate signals below threshold
-        // The further below, the more we cut (Expander ratio ~ 4:1 effectively)
         const ratio = envelope / threshold;
-        gain = ratio * ratio * ratio; // Cubic curve for natural sounding decay
+        if (aggressive) {
+            // Harder knee for aggressive removal. 
+            // Power of 12 makes anything below threshold drop to zero extremely fast.
+            gain = Math.pow(ratio, 12); 
+        } else {
+            // Cubic curve for natural sounding decay
+            gain = ratio * ratio * ratio; 
+        }
       }
       
       outputData[i] = input * gain;
+
+      if (i % chunkSize === 0) await yieldToMain();
     }
   }
   
-  return newBuffer;
+  return outputBuffer;
 };
 
 /**
  * Enhances audio quality using EQ, Compression and Noise Gating.
- * V3 Tuning: Noise Gate for breath/bg noise, stricter filters.
+ * V6 Tuning: Balanced Studio Profile.
  */
-export const enhanceAudio = async (inputBuffer: AudioBuffer): Promise<AudioBuffer> => {
-  // 1. First, apply Noise Gate to clean up source material (breaths, hiss)
-  const gatedBuffer = applyNoiseGate(inputBuffer, -48);
+export const enhanceAudio = async (inputBuffer: AudioBuffer, options: EnhanceOptions = {}): Promise<AudioBuffer> => {
+  const { aggressiveGate = false } = options;
+
+  // 1. Adaptive Noise Gate
+  // Calculate noise floor of this specific file
+  const noiseFloor = getNoiseFloor(inputBuffer);
+  
+  // Set threshold above noise floor. 
+  // Standard: +6dB above floor. 
+  // Aggressive: +22dB above floor (Very strict, assumes user wants to kill bg noise)
+  let gateThreshold = noiseFloor + (aggressiveGate ? 22 : 6);
+  
+  // Safety Clamps: Ensure we don't gate the actual speech too aggressively
+  // If the recording is very quiet, the floor might be -50. -50+22 = -28dB.
+  gateThreshold = Math.max(-50, Math.min(-12, gateThreshold));
+
+  console.log(`Measured Noise Floor: ${noiseFloor.toFixed(1)}dB. Gating at: ${gateThreshold.toFixed(1)}dB`);
+
+  const gatedBuffer = await applyNoiseGate(inputBuffer, gateThreshold, aggressiveGate);
 
   const offlineCtx = new OfflineAudioContext(
     gatedBuffer.numberOfChannels,
@@ -118,58 +191,82 @@ export const enhanceAudio = async (inputBuffer: AudioBuffer): Promise<AudioBuffe
   const source = offlineCtx.createBufferSource();
   source.buffer = gatedBuffer;
 
-  // 2. High-pass filter (Stricter cut for rumble/pops @ 100Hz)
+  // 2. High-pass filter (Remove deep rumble / AC hum)
   const highPass = offlineCtx.createBiquadFilter();
   highPass.type = 'highpass';
-  highPass.frequency.value = 100;
+  // Aggressive mode cuts higher (160Hz) to remove background mud/male voice rumble
+  highPass.frequency.value = aggressiveGate ? 160 : 85; 
   highPass.Q.value = 0.7;
 
-  // 3. Low-pass filter (Remove ultra-high hiss/electronic noise @ 15kHz)
-  const lowPass = offlineCtx.createBiquadFilter();
-  lowPass.type = 'lowpass';
-  lowPass.frequency.value = 15000;
-  lowPass.Q.value = 0.7;
-
-  // 4. Warmth/Body Boost (Fullness around 200Hz)
+  // 3. Natural Warmth (Low Shelf)
   const warmth = offlineCtx.createBiquadFilter();
-  warmth.type = 'peaking';
-  warmth.frequency.value = 220;
-  warmth.gain.value = 2.0; 
-  warmth.Q.value = 0.9;
+  warmth.type = 'lowshelf';
+  warmth.frequency.value = 100;
+  // Reduce warmth boost if aggressive to maintain clarity
+  warmth.gain.value = aggressiveGate ? 0.5 : 2.0; 
 
-  // 5. Gentle Clarity (Intelligibility around 3.5kHz)
-  const clarity = offlineCtx.createBiquadFilter();
-  clarity.type = 'peaking';
-  clarity.frequency.value = 3500;
-  clarity.gain.value = 1.5; 
-  clarity.Q.value = 1.0;
+  // 4. Mud Cut (Clean up boxiness)
+  const mudCut = offlineCtx.createBiquadFilter();
+  mudCut.type = 'peaking';
+  mudCut.frequency.value = 350;
+  mudCut.gain.value = -2.5;
+  mudCut.Q.value = 1.0;
 
-  // 6. De-Harsh / De-Ess (Cut the "ss" sharp frequencies around 7kHz)
-  const deHarsh = offlineCtx.createBiquadFilter();
-  deHarsh.type = 'peaking';
-  deHarsh.frequency.value = 7000;
-  deHarsh.gain.value = -4.5; // Cut sibilance
-  deHarsh.Q.value = 2.5;
+  // 5. De-Esser Notch 1: Target "SH" (sha)
+  const deEsserSh = offlineCtx.createBiquadFilter();
+  deEsserSh.type = 'peaking';
+  deEsserSh.frequency.value = 5500;
+  deEsserSh.gain.value = -5.0;
+  deEsserSh.Q.value = 2.5; 
 
-  // 7. Dynamics Compressor (Even out the volume)
+  // 6. De-Esser Notch 2: Target "SS" (sss)
+  const deEsserSs = offlineCtx.createBiquadFilter();
+  deEsserSs.type = 'peaking';
+  deEsserSs.frequency.value = 7500;
+  deEsserSs.gain.value = -7.0; 
+  deEsserSs.Q.value = 3.0;
+
+  // 7. De-Esser Notch 3: Target "ZZ" (fizz/buzz)
+  const deEsserZz = offlineCtx.createBiquadFilter();
+  deEsserZz.type = 'peaking';
+  deEsserZz.frequency.value = 10000;
+  deEsserZz.gain.value = -8.0; 
+  deEsserZz.Q.value = 2.0;
+
+  // 8. Low Pass / High Shelf 
+  // If aggressive, we low-pass earlier (6.5kHz) to cut high-freq hiss and whispers
+  const highShelf = offlineCtx.createBiquadFilter();
+  if (aggressiveGate) {
+    highShelf.type = 'lowpass';
+    highShelf.frequency.value = 6500; 
+    highShelf.Q.value = 0.5;
+  } else {
+    highShelf.type = 'highshelf';
+    highShelf.frequency.value = 12000;
+    highShelf.gain.value = -6.0;
+  }
+
+  // 9. Dynamics Compressor (Broadcast Leveling)
   const compressor = offlineCtx.createDynamicsCompressor();
   compressor.threshold.value = -24;
-  compressor.knee.value = 30; 
-  compressor.ratio.value = 3; 
-  compressor.attack.value = 0.005; // Fast attack to catch peaks
-  compressor.release.value = 0.20;
+  compressor.knee.value = 15; 
+  compressor.ratio.value = 3.5; 
+  compressor.attack.value = 0.002; 
+  compressor.release.value = 0.15;
 
-  // 8. Makeup Gain 
+  // 10. Makeup Gain 
   const gain = offlineCtx.createGain();
-  gain.gain.value = 1.5; 
+  gain.gain.value = 1.3; 
 
-  // Chain: Source -> HighPass -> LowPass -> Warmth -> Clarity -> DeHarsh -> Compressor -> Gain -> Dest
+  // Chain: Source -> HPF -> Warmth -> MudCut -> DeEssSh -> DeEssSs -> DeEssZz -> HighShelf -> Comp -> Gain -> Out
   source.connect(highPass);
-  highPass.connect(lowPass);
-  lowPass.connect(warmth);
-  warmth.connect(clarity);
-  clarity.connect(deHarsh);
-  deHarsh.connect(compressor);
+  highPass.connect(warmth);
+  warmth.connect(mudCut);
+  mudCut.connect(deEsserSh);
+  deEsserSh.connect(deEsserSs);
+  deEsserSs.connect(deEsserZz);
+  deEsserZz.connect(highShelf);
+  highShelf.connect(compressor);
   compressor.connect(gain);
   gain.connect(offlineCtx.destination);
 
@@ -180,7 +277,6 @@ export const enhanceAudio = async (inputBuffer: AudioBuffer): Promise<AudioBuffe
 
 /**
  * Encodes an AudioBuffer to a WAV Blob.
- * Async to prevent UI freezing on large files.
  */
 export const bufferToWav = async (buffer: AudioBuffer): Promise<Blob> => {
   const numOfChan = buffer.numberOfChannels;
@@ -222,7 +318,6 @@ export const bufferToWav = async (buffer: AudioBuffer): Promise<Blob> => {
   writeString("data");
   writeUint32(length - offset - 4);
 
-  // Audio Data
   for (let i = 0; i < buffer.numberOfChannels; i++) {
     channels.push(buffer.getChannelData(i));
   }
@@ -232,7 +327,6 @@ export const bufferToWav = async (buffer: AudioBuffer): Promise<Blob> => {
   
   while (pos < buffer.length) {
     const end = Math.min(pos + chunkSize, buffer.length);
-    
     for (; pos < end; pos++) {
       for (let i = 0; i < numOfChan; i++) {
         let sample = Math.max(-1, Math.min(1, channels[i][pos]));
@@ -241,8 +335,6 @@ export const bufferToWav = async (buffer: AudioBuffer): Promise<Blob> => {
         offset += 2;
       }
     }
-    
-    // Yield to main thread to prevent freezing
     if (pos % (chunkSize * 10) === 0) await yieldToMain();
   }
   
@@ -259,13 +351,12 @@ export const bufferToMp3 = async (buffer: AudioBuffer): Promise<Blob> => {
 
   const numChannels = buffer.numberOfChannels;
   const sampleRate = buffer.sampleRate;
-  const mp3encoder = new lamejs.Mp3Encoder(numChannels, sampleRate, 128); // 128kbps
+  const mp3encoder = new lamejs.Mp3Encoder(numChannels, sampleRate, 128); 
 
   const left = buffer.getChannelData(0);
   const right = numChannels > 1 ? buffer.getChannelData(1) : left;
 
-  // Process in chunks to prevent UI freeze
-  const sampleBlockSize = 1152 * 10; // multiple of 1152 for efficiency
+  const sampleBlockSize = 1152 * 10; 
   const mp3Data = [];
 
   for (let i = 0; i < left.length; i += sampleBlockSize) {
@@ -273,7 +364,6 @@ export const bufferToMp3 = async (buffer: AudioBuffer): Promise<Blob> => {
     const leftChunk = new Int16Array(end - i);
     const rightChunk = numChannels > 1 ? new Int16Array(end - i) : undefined;
 
-    // Convert float to int16
     for (let j = 0; j < end - i; j++) {
       let s = Math.max(-1, Math.min(1, left[i + j]));
       leftChunk[j] = s < 0 ? s * 0x8000 : s * 0x7FFF;
@@ -295,7 +385,6 @@ export const bufferToMp3 = async (buffer: AudioBuffer): Promise<Blob> => {
       mp3Data.push(mp3buf);
     }
 
-    // Yield to main thread
     await yieldToMain();
   }
 
@@ -317,9 +406,9 @@ export const removeSilence = async (
 ): Promise<ProcessResult> => {
   const { 
     removeRatio, 
-    thresholdDb = -48, // Lower threshold for better sensitivity
-    minSilenceDuration = 0.25,
-    padding = 0.15 // Default padding to keep words intact
+    thresholdDb = -35, 
+    minSilenceDuration = 0.1, 
+    padding = 0.05 
   } = options;
   
   const threshold = Math.pow(10, thresholdDb / 20);
@@ -334,7 +423,6 @@ export const removeSilence = async (
   const numBlocks = Math.ceil(length / blockSize);
   const blockIsSilence = new Uint8Array(numBlocks);
   
-  // 1. Analyze for silence regions
   for (let b = 0; b < numBlocks; b++) {
     const start = b * blockSize;
     const end = Math.min(start + blockSize, length);
@@ -354,14 +442,12 @@ export const removeSilence = async (
       blockIsSilence[b] = 1;
     }
 
-    // Yield occasionally during analysis
     if (b % 5000 === 0) await yieldToMain();
   }
 
-  // 2. Identify raw contiguous silent blocks
   interface Region {
     start: number;
-    end: number; // exclusive
+    end: number; 
     isSilence: boolean;
   }
   
@@ -387,42 +473,30 @@ export const removeSilence = async (
     isSilence: currentIsSilence 
   });
 
-  // 3. Apply Padding (Safety Margins)
-  // We expand 'sound' regions into 'silence' regions by `paddingSamples`
-  // This ensures breath, attack, and decay are preserved.
-  
-  // Clone regions to modify boundaries
   const regions: Region[] = rawRegions.map(r => ({...r}));
 
-  // Iterate forward to extend end of sound
   for (let i = 0; i < regions.length - 1; i++) {
     const current = regions[i];
     const next = regions[i + 1];
     
-    // If current is SOUND and next is SILENCE
     if (!current.isSilence && next.isSilence) {
-       // Extend current end by padding
        const shift = Math.min(paddingSamples, next.end - next.start);
        current.end += shift;
        next.start += shift;
     }
   }
 
-  // Iterate backward to extend start of sound
   for (let i = regions.length - 1; i > 0; i--) {
     const current = regions[i];
     const prev = regions[i - 1];
 
-    // If current is SOUND and prev is SILENCE
     if (!current.isSilence && prev.isSilence) {
-      // Extend current start backward
       const shift = Math.min(paddingSamples, prev.end - prev.start);
       current.start -= shift;
       prev.end -= shift;
     }
   }
 
-  // 4. Determine new total length & create copy directives
   let outputSamplesCount = 0;
   const regionDirectives: { regionIndex: number, keepRatio: number }[] = [];
   
@@ -430,7 +504,6 @@ export const removeSilence = async (
     const r = regions[i];
     const regionLength = r.end - r.start;
     
-    // Skip empty regions (caused by padding consuming small silences)
     if (regionLength <= 0) continue;
 
     let keepRatio = 1;
@@ -444,11 +517,9 @@ export const removeSilence = async (
     regionDirectives.push({ regionIndex: i, keepRatio });
   }
   
-  // 5. Create output buffer
   const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
   const outputBuffer = audioContext.createBuffer(numChannels, outputSamplesCount, sampleRate);
   
-  // 6. Copy data
   for (let c = 0; c < numChannels; c++) {
     const inputData = inputBuffer.getChannelData(c);
     const outputData = outputBuffer.getChannelData(c);
@@ -461,19 +532,15 @@ export const removeSilence = async (
       const regionLength = r.end - r.start;
       
       if (keepRatio === 1) {
-        // Copy full sound or short silence
         outputData.set(inputData.subarray(r.start, r.end), writeCursor);
         writeCursor += regionLength;
       } else {
-        // Truncate silence
-        // Keep the start of the silence (natural decay)
         const samplesToKeep = Math.floor(regionLength * keepRatio);
         outputData.set(inputData.subarray(r.start, r.start + samplesToKeep), writeCursor);
         writeCursor += samplesToKeep;
       }
       
       if (c === 0 && onProgress) {
-        // Report progress occasionally
         if (i % 50 === 0) {
             onProgress(i / regions.length);
             await yieldToMain();
@@ -482,8 +549,6 @@ export const removeSilence = async (
     }
   }
 
-  // 7. Convert regions back to AudioRegion format for visualization
-  // We use the adjusted regions so the visualizer shows the padding
   const finalRegions: AudioRegion[] = regions.filter(r => (r.end - r.start) > 0).map(r => ({
     start: r.start,
     end: r.end,

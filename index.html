@@ -3,9 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SilenceCut - Audio Silence Remover</title>
+    <meta name="description" content="Free online audio silence remover and professional voice enhancer. Remove silence from MP3/WAV and improve voice quality with AI-like processing." />
+    <title>SilenceCut - Audio Silence Remover & Voice Enhancer</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+    
+    <!-- 
+      GOOGLE ADSENSE SETUP:
+      1. Sign up for Google AdSense.
+      2. Get your verification script.
+      3. Paste the script here between the comments.
+    -->
+    <!-- <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-YOUR_PUBLISHER_ID" crossorigin="anonymous"></script> -->
+    <!-- END ADSENSE -->
+
     <script>
       tailwind.config = {
         theme: {
@@ -56,9 +67,11 @@
   <script type="importmap">
 {
   "imports": {
-    "react/": "https://aistudiocdn.com/react@^19.2.0/",
-    "react": "https://aistudiocdn.com/react@^19.2.0",
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "vite": "https://aistudiocdn.com/vite@^7.2.6",
+    "@vitejs/plugin-react": "https://aistudiocdn.com/@vitejs/plugin-react@^5.1.1",
+    "react/": "https://aistudiocdn.com/react@^19.2.1/",
+    "react": "https://aistudiocdn.com/react@^19.2.1",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/",
     "lucide-react": "https://aistudiocdn.com/lucide-react@^0.555.0"
   }
 }
@@ -66,5 +79,7 @@
 </head>
   <body>
     <div id="root"></div>
+    <!-- Entry point for Vite -->
+    <script type="module" src="/index.tsx"></script>
   </body>
 </html>

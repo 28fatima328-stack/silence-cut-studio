@@ -1,20 +1,43 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# SilenceCut Studio
 
-# Run and deploy your AI Studio app
+A professional client-side audio post-production web app built with React. Features intelligent silence removal, broadcast-quality voice enhancement (noise gating, EQ, compression), and instant MP3/WAV export—all processed locally in the browser.
 
-This contains everything you need to run your app locally.
+## Features
 
-View your app in AI Studio: https://ai.studio/apps/drive/1-DyZBDx6qELIXO5y4uoV5CT0HwYyYjPQ
+*   **🚫 Smart Silence Removal:** Automatically detects and removes dead air with customizable intensity (70%, 80%, 100%) and safety padding to keep words intact.
+*   **🎙️ Studio Voice Enhance:** "Adobe Podcast" style DSP chain featuring dual-stage de-essing, proximity bass boost, and broadcast compression.
+*   **🔒 100% Client-Side:** All processing happens in the browser using the Web Audio API. No files are ever uploaded to a server.
+*   **📊 Visual Feedback:** Real-time waveform visualization showing exactly where cuts happen.
+*   **💾 Multi-Format Export:** Instant export to WAV or MP3 (via LAMEjs).
 
-## Run Locally
+## How to Run Locally
 
-**Prerequisites:**  Node.js
+1.  **Install Node.js**: Ensure you have Node.js installed (v16 or higher).
+2.  **Install Dependencies**:
+    ```bash
+    npm install
+    ```
+3.  **Start Development Server**:
+    ```bash
+    npm run dev
+    ```
+4.  **Open in Browser**: Navigate to `http://localhost:5173`.
 
+## How to Deploy (Free)
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+You can deploy this project for free using **Vercel** or **Netlify**.
+
+1.  Push this code to a GitHub repository.
+2.  Login to Vercel/Netlify and "Add New Project".
+3.  Select your repository.
+4.  The build settings should be detected automatically (Framework: Vite).
+5.  Click **Deploy**.
+
+## Tech Stack
+
+*   React
+*   TypeScript
+*   Tailwind CSS
+*   Vite
+*   Web Audio API (OfflineAudioContext)
+*   LAMEjs (for MP3 encoding)
